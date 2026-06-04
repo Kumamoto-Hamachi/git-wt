@@ -448,3 +448,77 @@ func RemoveWorktree(ctx context.Context, path string, force bool) error {
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
+
+// MoveWorktree moves a worktree directory from oldPath to newPath using
+// 'git worktree move'. The parent directory of newPath is created if needed.
+// If force is true, '--force' is passed to allow moving worktrees with
+// uncommitted or untracked changes.
+func MoveWorktree(ctx context.Context, oldPath, newPath string, force bool) error {
+	parentDir := filepath.Dir(newPath)
+	if err := os.MkdirAll(parentDir, 0755); err != nil {
+		return fmt.Errorf("failed to create parent directory: %w", err)
+	}
+	if err := initBaseDir(parentDir); err != nil {
+		return err
+	}
+
+	args := []string{"worktree", "move"}
+	if force {
+		args = append(args, "--force")
+	}
+	args = append(args, oldPath, newPath)
+
+	cmd, err := gitCommand(ctx, args...)
+	if err != nil {
+		return err
+	}
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// RemoveEmptyParents walks up from startDir removing empty directories until
+// it reaches stopDir (exclusive) or hits a non-empty directory. stopDir is
+// never removed. Both paths should be absolute and clean.
+//
+// Directories that contain only the basedir decoration files written by
+// initBaseDir (.gitignore, README.md) are treated as empty for cleanup
+// purposes, because slash-style branch names (e.g. "feat/foo") cause those
+// files to be planted in every intermediate directory under basedir.
+func RemoveEmptyParents(startDir, stopDir string) error {
+	stopDir = filepath.Clean(stopDir)
+	cur := filepath.Clean(startDir)
+	for cur != stopDir && cur != "/" && cur != "." {
+		entries, err := os.ReadDir(cur)
+		if err != nil {
+			if os.IsNotExist(err) {
+				cur = filepath.Dir(cur)
+				continue
+			}
+			return err
+		}
+		if !onlyDecorationFiles(entries) {
+			return nil
+		}
+		if err := os.RemoveAll(cur); err != nil {
+			return err
+		}
+		cur = filepath.Dir(cur)
+	}
+	return nil
+}
+
+func onlyDecorationFiles(entries []os.DirEntry) bool {
+	for _, e := range entries {
+		if e.IsDir() {
+			return false
+		}
+		switch e.Name() {
+		case ".gitignore", "README.md":
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}

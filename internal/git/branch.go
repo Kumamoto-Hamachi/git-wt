@@ -82,6 +82,31 @@ func DeleteBranchInDir(ctx context.Context, name string, force bool, dir string)
 	return cmd.Run()
 }
 
+// RenameBranch renames a branch from oldName to newName.
+// If force is true, it uses -M (force rename, allows overwriting an existing
+// target branch), otherwise -m (safe rename). When dir is non-empty the
+// command is run with 'git -C <dir>', which is required when the calling
+// process's working directory has just been removed (e.g., after moving the
+// current worktree).
+func RenameBranch(ctx context.Context, oldName, newName string, force bool, dir string) error {
+	flag := "-m"
+	if force {
+		flag = "-M"
+	}
+	var args []string
+	if dir != "" {
+		args = append(args, "-C", dir)
+	}
+	args = append(args, "branch", flag, oldName, newName)
+	cmd, err := gitCommand(ctx, args...)
+	if err != nil {
+		return err
+	}
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
 // IsBranchMerged checks if a branch is merged into the current branch.
 func IsBranchMerged(ctx context.Context, name string) (bool, error) {
 	cmd, err := gitCommand(ctx, "branch", "--merged")

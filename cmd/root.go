@@ -38,6 +38,8 @@ import (
 var (
 	deleteFlag      bool
 	forceDeleteFlag bool
+	moveFlag        bool
+	forceMoveFlag   bool
 	initShell       string
 	nocd            bool
 	branchFlag      string
@@ -69,11 +71,13 @@ Examples:
   git wt -b <branch> <worktree>                  Create worktree with a different branch name
   git wt -d <branch|worktree|path>...            Delete worktree and branch (safe)
   git wt -D <branch|worktree|path>...            Force delete worktree and branch
+  git wt -m [<old>] <new>                        Rename worktree directory and branch (safe)
+  git wt -M [<old>] <new>                        Force rename (allow overwriting target / dirty worktree)
 
-Note: The default branch (e.g., main, master) is protected from accidental deletion.
-      - With worktree: worktree is deleted, but branch is preserved.
+Note: The default branch (e.g., main, master) is protected from accidental deletion or rename.
+      - With worktree: -d removes the worktree but keeps the branch; -m/-M is blocked entirely.
       - Without worktree: deletion is blocked entirely.
-      Use --allow-delete-default to override and delete the branch.
+      Use --allow-delete-default to override and delete or rename the branch.
 
 Shell Integration:
   Add the following to your shell config to enable worktree switching and completion:
@@ -193,6 +197,8 @@ func init() {
 
 	rootCmd.Flags().BoolVarP(&deleteFlag, "delete", "d", false, "Delete worktree and branch by name or path (safe delete, only if merged)")
 	rootCmd.Flags().BoolVarP(&forceDeleteFlag, "force-delete", "D", false, "Force delete worktree and branch by name or path")
+	rootCmd.Flags().BoolVarP(&moveFlag, "move", "m", false, "Rename worktree directory and branch (safe rename)")
+	rootCmd.Flags().BoolVarP(&forceMoveFlag, "force-move", "M", false, "Force rename worktree directory and branch (allow overwriting existing target)")
 	rootCmd.Flags().StringVar(&initShell, "init", "", "Output shell initialization script (bash, zsh, fish, powershell)")
 	rootCmd.Flags().BoolVar(&nocd, "nocd", false, "Do not change directory to the worktree (also disables git() wrapper when used with --init)")
 	rootCmd.Flags().BoolVar(&nocd, "no-switch-directory", false, "")
@@ -243,6 +249,9 @@ func runRoot(cmd *cobra.Command, args []string) error {
 		if branchFlag != "" {
 			return fmt.Errorf("cannot use -b/--branch with -D/--force-delete")
 		}
+		if moveFlag || forceMoveFlag {
+			return fmt.Errorf("cannot combine -m/-M with -d/-D")
+		}
 		args = uniqueArgs(args)
 		return deleteWorktrees(ctx, cmd, args, true)
 	}
@@ -250,8 +259,19 @@ func runRoot(cmd *cobra.Command, args []string) error {
 		if branchFlag != "" {
 			return fmt.Errorf("cannot use -b/--branch with -d/--delete")
 		}
+		if moveFlag || forceMoveFlag {
+			return fmt.Errorf("cannot combine -m/-M with -d/-D")
+		}
 		args = uniqueArgs(args)
 		return deleteWorktrees(ctx, cmd, args, false)
+	}
+
+	// Handle move/rename flags
+	if moveFlag || forceMoveFlag {
+		if branchFlag != "" {
+			return fmt.Errorf("cannot use -b/--branch with -m/-M")
+		}
+		return moveWorktree(ctx, args, forceMoveFlag)
 	}
 
 	// For create/switch: validate argument count (like git branch)
@@ -725,6 +745,174 @@ func deleteWorktrees(ctx context.Context, cmd *cobra.Command, branches []string,
 		fmt.Println(mainRoot)
 	}
 
+	return nil
+}
+
+// moveWorktree renames a worktree's directory and its associated branch in
+// a single operation. It accepts either one argument (the new name, applied
+// to the current worktree) or two arguments (old, new).
+func moveWorktree(ctx context.Context, args []string, force bool) error {
+	if len(args) == 0 || len(args) > 2 {
+		return fmt.Errorf("expected 1 or 2 arguments for -m/-M: <newname> or <oldname> <newname>, got %d", len(args))
+	}
+
+	var oldQuery, newName string
+	if len(args) == 1 {
+		newName = args[0]
+	} else {
+		oldQuery = args[0]
+		newName = args[1]
+	}
+
+	cfg, err := git.LoadConfig(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+	baseDir, err := git.ExpandBaseDir(ctx, cfg.BaseDir)
+	if err != nil {
+		return fmt.Errorf("failed to expand basedir: %w", err)
+	}
+	// Resolve symlinks for reliable path comparison (macOS /var vs /private/var).
+	if resolved, err := filepath.EvalSymlinks(baseDir); err == nil {
+		baseDir = resolved
+	}
+
+	// Resolve source worktree.
+	var src *git.Worktree
+	if oldQuery == "" {
+		// Single-argument form: rename the current linked worktree. The main
+		// working tree cannot be renamed via this command.
+		rc, err := git.DetectRepoContext(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to detect repository context: %w", err)
+		}
+		if !rc.IsLinkedWorktree() {
+			return fmt.Errorf("current directory is not a linked worktree; specify the worktree to rename explicitly")
+		}
+		cur, err := git.CurrentWorktree(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to get current worktree: %w", err)
+		}
+		src, err = git.FindWorktreeByBranchOrDir(ctx, cur)
+		if err != nil {
+			return fmt.Errorf("failed to find current worktree: %w", err)
+		}
+		if src == nil {
+			return fmt.Errorf("current directory is not a linked worktree; specify the worktree to rename explicitly")
+		}
+	} else {
+		src, err = git.FindWorktreeByBranchOrDir(ctx, oldQuery)
+		if err != nil {
+			return fmt.Errorf("failed to find worktree: %w", err)
+		}
+		if src == nil {
+			return fmt.Errorf("no worktree found for %q", oldQuery)
+		}
+	}
+
+	if src.Branch == "" || src.Branch == git.DetachedMarker {
+		return fmt.Errorf("cannot rename worktree at %q: it has no branch (detached HEAD)", src.Path)
+	}
+
+	// Protect the default branch unless overridden.
+	isDefault, err := git.IsDefaultBranch(ctx, src.Branch)
+	if err != nil {
+		return fmt.Errorf("failed to check default branch: %w", err)
+	}
+	if isDefault && !allowDeleteDefault {
+		return fmt.Errorf("cannot rename default branch %q: use --allow-delete-default to override", src.Branch)
+	}
+
+	// Resolve old and new paths.
+	oldPath, err := filepath.Abs(src.Path)
+	if err != nil {
+		return fmt.Errorf("failed to resolve old worktree path: %w", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(oldPath); err == nil {
+		oldPath = resolved
+	}
+
+	newPath, err := git.WorktreePathFor(ctx, cfg.BaseDir, newName)
+	if err != nil {
+		return fmt.Errorf("failed to compute new worktree path: %w", err)
+	}
+
+	if oldPath == filepath.Clean(newPath) && src.Branch == newName {
+		return fmt.Errorf("worktree %q is already named %q", src.Branch, newName)
+	}
+
+	// Pre-flight checks for target collisions (git worktree move / branch -m also catch these,
+	// but checking up front lets us return a clearer error and avoids partial state).
+	if !force {
+		if info, err := os.Stat(newPath); err == nil {
+			if info.IsDir() {
+				return fmt.Errorf("target worktree directory %q already exists (use -M to force)", newPath)
+			}
+			return fmt.Errorf("target path %q exists and is not a directory", newPath)
+		}
+		if src.Branch != newName {
+			exists, err := git.LocalBranchExists(ctx, newName)
+			if err != nil {
+				return fmt.Errorf("failed to check branch existence: %w", err)
+			}
+			if exists {
+				return fmt.Errorf("branch %q already exists (use -M to force)", newName)
+			}
+		}
+	}
+
+	// Detect whether we are currently inside the worktree being renamed.
+	curWt, _ := git.CurrentWorktree(ctx) //nostyle:handlerrors
+	inside := false
+	if curWt != "" {
+		if resolved, err := filepath.EvalSymlinks(curWt); err == nil {
+			curWt = resolved
+		}
+		inside = curWt == oldPath
+	}
+
+	mainRoot, err := git.MainRepoRoot(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get main repository root: %w", err)
+	}
+
+	// Move the directory first. Skip when source and target paths are identical
+	// (only the branch changes).
+	if oldPath != filepath.Clean(newPath) {
+		if err := git.MoveWorktree(ctx, oldPath, newPath, force); err != nil {
+			return fmt.Errorf("failed to move worktree: %w", err)
+		}
+		// Clean up now-empty parent directories under basedir (e.g., the "feat/"
+		// left behind when renaming "feat/foo" out of basedir/feat/foo).
+		oldParent := filepath.Dir(oldPath)
+		if err := git.RemoveEmptyParents(oldParent, baseDir); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to clean up empty parent directories: %v\n", err)
+		}
+	}
+
+	// Rename the branch. Run from the new worktree path so the command works
+	// even when the old cwd has just been removed.
+	if src.Branch != newName {
+		if err := git.RenameBranch(ctx, src.Branch, newName, force, newPath); err != nil {
+			return fmt.Errorf("failed to rename branch: %w", err)
+		}
+	}
+
+	// User-facing message.
+	if src.Branch == newName {
+		fmt.Fprintf(os.Stderr, "Moved worktree to %q\n", newPath)
+	} else {
+		fmt.Fprintf(os.Stderr, "Renamed worktree to %q and branch to %q\n", newPath, newName)
+	}
+
+	// Shell integration: when the current worktree was renamed, print the new
+	// path so the shell wrapper can cd there. The shell wrapper inspects
+	// -m/-M to keep this consistent with wt.nocd=create (existing worktree,
+	// not a fresh creation).
+	_ = mainRoot
+	if inside && os.Getenv("GIT_WT_SHELL_INTEGRATION") == "1" {
+		fmt.Println(newPath)
+	}
 	return nil
 }
 
