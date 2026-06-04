@@ -72,7 +72,7 @@ Examples:
   git wt -d <branch|worktree|path>...            Delete worktree and branch (safe)
   git wt -D <branch|worktree|path>...            Force delete worktree and branch
   git wt -m [<old>] <new>                        Rename worktree directory and branch (safe)
-  git wt -M [<old>] <new>                        Force rename (allow overwriting target / dirty worktree)
+  git wt -M [<old>] <new>                        Force rename (overwrite existing branch, allow moving dirty/locked worktrees)
 
 Note: The default branch (e.g., main, master) is protected from accidental deletion or rename.
       - With worktree: -d removes the worktree but keeps the branch; -m/-M is blocked entirely.
@@ -198,7 +198,7 @@ func init() {
 	rootCmd.Flags().BoolVarP(&deleteFlag, "delete", "d", false, "Delete worktree and branch by name or path (safe delete, only if merged)")
 	rootCmd.Flags().BoolVarP(&forceDeleteFlag, "force-delete", "D", false, "Force delete worktree and branch by name or path")
 	rootCmd.Flags().BoolVarP(&moveFlag, "move", "m", false, "Rename worktree directory and branch (safe rename)")
-	rootCmd.Flags().BoolVarP(&forceMoveFlag, "force-move", "M", false, "Force rename worktree directory and branch (allow overwriting existing target)")
+	rootCmd.Flags().BoolVarP(&forceMoveFlag, "force-move", "M", false, "Force rename worktree directory and branch (allow overwriting existing branch and moving dirty/locked worktrees)")
 	rootCmd.Flags().StringVar(&initShell, "init", "", "Output shell initialization script (bash, zsh, fish, powershell)")
 	rootCmd.Flags().BoolVar(&nocd, "nocd", false, "Do not change directory to the worktree (also disables git() wrapper when used with --init)")
 	rootCmd.Flags().BoolVar(&nocd, "no-switch-directory", false, "")
@@ -841,23 +841,34 @@ func moveWorktree(ctx context.Context, args []string, force bool) error {
 		return fmt.Errorf("worktree %q is already named %q", src.Branch, newName)
 	}
 
-	// Pre-flight checks for target collisions (git worktree move / branch -m also catch these,
-	// but checking up front lets us return a clearer error and avoids partial state).
-	if !force {
-		if info, err := os.Stat(newPath); err == nil {
-			if info.IsDir() {
-				return fmt.Errorf("target worktree directory %q already exists (use -M to force)", newPath)
-			}
-			return fmt.Errorf("target path %q exists and is not a directory", newPath)
+	// Validate the new branch name BEFORE touching the filesystem. Otherwise
+	// `git worktree move` can succeed and `git branch -m` then fail on an
+	// invalid name (e.g., "foo..bar"), leaving a worktree directory renamed
+	// while the branch is still on the old name.
+	if src.Branch != newName {
+		if err := git.CheckBranchNameFormat(ctx, newName); err != nil {
+			return err
 		}
-		if src.Branch != newName {
-			exists, err := git.LocalBranchExists(ctx, newName)
-			if err != nil {
-				return fmt.Errorf("failed to check branch existence: %w", err)
-			}
-			if exists {
-				return fmt.Errorf("branch %q already exists (use -M to force)", newName)
-			}
+	}
+
+	// Pre-flight checks for target collisions. Branch collisions are skipped
+	// under -M because `git branch -M` can overwrite a target branch; target
+	// directory collisions are checked unconditionally because `git worktree
+	// move --force` does NOT overwrite an existing destination — its --force
+	// only relaxes dirty/locked-worktree checks.
+	if info, err := os.Stat(newPath); err == nil {
+		if info.IsDir() {
+			return fmt.Errorf("target worktree directory %q already exists", newPath)
+		}
+		return fmt.Errorf("target path %q exists and is not a directory", newPath)
+	}
+	if !force && src.Branch != newName {
+		exists, err := git.LocalBranchExists(ctx, newName)
+		if err != nil {
+			return fmt.Errorf("failed to check branch existence: %w", err)
+		}
+		if exists {
+			return fmt.Errorf("branch %q already exists (use -M to force)", newName)
 		}
 	}
 
@@ -869,11 +880,6 @@ func moveWorktree(ctx context.Context, args []string, force bool) error {
 			curWt = resolved
 		}
 		inside = curWt == oldPath
-	}
-
-	mainRoot, err := git.MainRepoRoot(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get main repository root: %w", err)
 	}
 
 	// Move the directory first. Skip when source and target paths are identical
@@ -909,7 +915,6 @@ func moveWorktree(ctx context.Context, args []string, force bool) error {
 	// path so the shell wrapper can cd there. The shell wrapper inspects
 	// -m/-M to keep this consistent with wt.nocd=create (existing worktree,
 	// not a fresh creation).
-	_ = mainRoot
 	if inside && os.Getenv("GIT_WT_SHELL_INTEGRATION") == "1" {
 		fmt.Println(newPath)
 	}

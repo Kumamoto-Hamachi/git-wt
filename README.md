@@ -12,7 +12,7 @@ $ git wt -b <branch> <worktree>     # Create worktree with a different branch na
 $ git wt -d <branch|worktree|path>  # Delete worktree and branch (safe)
 $ git wt -D <branch|worktree|path>  # Force delete worktree and branch
 $ git wt -m [<old>] <new>           # Rename worktree directory and branch (safe)
-$ git wt -M [<old>] <new>           # Force rename (allow overwriting target / dirty worktree)
+$ git wt -M [<old>] <new>           # Force rename (overwrite existing branch, allow moving dirty/locked worktrees)
 ```
 
 The target can be specified as:

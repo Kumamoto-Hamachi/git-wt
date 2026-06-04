@@ -82,6 +82,21 @@ func DeleteBranchInDir(ctx context.Context, name string, force bool, dir string)
 	return cmd.Run()
 }
 
+// CheckBranchNameFormat validates that name is a syntactically valid Git
+// branch name (e.g., rejects "foo..bar", names ending with ".lock", etc.),
+// using `git check-ref-format refs/heads/<name>`. It does not check whether
+// the branch already exists.
+func CheckBranchNameFormat(ctx context.Context, name string) error {
+	cmd, err := gitCommand(ctx, "check-ref-format", "refs/heads/"+name)
+	if err != nil {
+		return err
+	}
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("invalid branch name %q: %w", name, err)
+	}
+	return nil
+}
+
 // RenameBranch renames a branch from oldName to newName.
 // If force is true, it uses -M (force rename, allows overwriting an existing
 // target branch), otherwise -m (safe rename). When dir is non-empty the

@@ -105,7 +105,7 @@ func TestE2E_MoveWorktree(t *testing.T) {
 		}
 	})
 
-	t.Run("target_dir_exists_blocks_safe", func(t *testing.T) {
+	t.Run("target_dir_exists_blocks_even_force", func(t *testing.T) {
 		t.Parallel()
 		repo := testutil.NewTestRepo(t)
 		repo.CreateFile("README.md", "# Test")
@@ -118,12 +118,24 @@ func TestE2E_MoveWorktree(t *testing.T) {
 			t.Fatalf("failed to create worktree dst: %v", err)
 		}
 
+		// Safe rename refuses target dir collisions.
 		out, err := runGitWt(t, binPath, repo.Root, "-m", "src", "dst")
 		if err == nil {
 			t.Fatalf("rename should fail when target dir exists, got: %s", out)
 		}
 		if !strings.Contains(out, "already exists") {
 			t.Errorf("error should mention 'already exists', got: %s", out)
+		}
+
+		// -M does NOT change target-dir behavior because `git worktree move
+		// --force` does not overwrite an existing destination directory; force
+		// only relaxes dirty/locked-worktree checks.
+		out, err = runGitWt(t, binPath, repo.Root, "-M", "src", "dst")
+		if err == nil {
+			t.Fatalf("-M rename should also fail when target dir exists, got: %s", out)
+		}
+		if !strings.Contains(out, "already exists") {
+			t.Errorf("error should mention 'already exists' under -M too, got: %s", out)
 		}
 	})
 
@@ -293,6 +305,33 @@ func TestE2E_MoveWorktree(t *testing.T) {
 		out, err := runGitWt(t, binPath, repo.Root, "-m", "-b", "x", "with-b", "y")
 		if err == nil {
 			t.Fatalf("-m with -b should fail, got: %s", out)
+		}
+	})
+
+	t.Run("rejects_invalid_branch_name_before_move", func(t *testing.T) {
+		t.Parallel()
+		repo := testutil.NewTestRepo(t)
+		repo.CreateFile("README.md", "# Test")
+		repo.Commit("initial commit")
+
+		out, err := runGitWt(t, binPath, repo.Root, "valid-src")
+		if err != nil {
+			t.Fatalf("failed to create worktree: %v", err)
+		}
+		oldPath := worktreePath(out)
+
+		// "foo..bar" is rejected by git check-ref-format.
+		out, err = runGitWt(t, binPath, repo.Root, "-m", "valid-src", "foo..bar")
+		if err == nil {
+			t.Fatalf("rename should reject invalid branch name, got: %s", out)
+		}
+		if !strings.Contains(out, "invalid branch name") {
+			t.Errorf("error should mention 'invalid branch name', got: %s", out)
+		}
+
+		// Worktree directory must NOT have been moved.
+		if _, err := os.Stat(oldPath); err != nil {
+			t.Errorf("worktree directory should be untouched after rejected rename, got: %v", err)
 		}
 	})
 
