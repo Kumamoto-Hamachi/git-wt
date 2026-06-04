@@ -956,9 +956,12 @@ func moveWorktree(ctx context.Context, cmd *cobra.Command, args []string, force 
 	}
 
 	// User-facing message.
-	if src.Branch == newName {
+	switch {
+	case src.Branch == newName:
 		fmt.Fprintf(os.Stderr, "Moved worktree to %q\n", newPath)
-	} else {
+	case samePath:
+		fmt.Fprintf(os.Stderr, "Renamed branch %q to %q (worktree directory unchanged)\n", src.Branch, newName)
+	default:
 		fmt.Fprintf(os.Stderr, "Renamed worktree to %q and branch to %q\n", newPath, newName)
 	}
 

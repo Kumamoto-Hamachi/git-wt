@@ -116,7 +116,9 @@ func RenameBranch(ctx context.Context, oldName, newName string, force bool, dir 
 	if dir != "" {
 		args = append(args, "-C", dir)
 	}
-	args = append(args, "branch", flag, oldName, newName)
+	// Pass branch names after `--` so that names beginning with `-`
+	// (e.g. `-q`) are not parsed as options by `git branch`.
+	args = append(args, "branch", flag, "--", oldName, newName)
 	cmd, err := gitCommand(ctx, args...)
 	if err != nil {
 		return err
