@@ -91,6 +91,10 @@ func CheckBranchNameFormat(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
+	// Forward stderr so any explanation git emits about the malformed ref
+	// surfaces to the user, matching the style of the other git helpers in
+	// this package.
+	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("invalid branch name %q: %w", name, err)
 	}
