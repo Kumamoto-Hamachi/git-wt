@@ -553,7 +553,11 @@ func isStrictDescendant(path, root string) bool {
 	if rel == "." || rel == "" {
 		return false
 	}
-	if strings.HasPrefix(rel, "..") {
+	// Reject only genuine parent traversals: the rel must be exactly ".."
+	// or start with "../" (i.e. ".." followed by the path separator).
+	// A bare strings.HasPrefix(rel, "..") would also reject legitimate
+	// child names that happen to start with two dots (e.g. "..cache").
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return false
 	}
 	return true
@@ -568,6 +572,14 @@ func isStrictDescendant(path, root string) bool {
 func onlyUntouchedDecorationFiles(dir string, entries []os.DirEntry) (bool, error) {
 	for _, e := range entries {
 		if e.IsDir() {
+			return false, nil
+		}
+		// Symlinks report IsDir()==false even when they point at a directory.
+		// Conservatively refuse to remove a directory containing any symlink:
+		// a symlink named .gitignore/README.md whose target happens to match
+		// the expected content would otherwise be considered removable, and
+		// os.RemoveAll would follow the symlink semantics unpredictably.
+		if e.Type()&os.ModeSymlink != 0 {
 			return false, nil
 		}
 		var want string
