@@ -344,8 +344,15 @@ func completeBranches(cmd *cobra.Command, args []string, toComplete string) ([]s
 	ctx := cmd.Context()
 
 	// For second argument (start-point), complete with branches including remote
-	if len(args) == 1 && !deleteFlag && !forceDeleteFlag {
+	if len(args) == 1 && !deleteFlag && !forceDeleteFlag && !moveFlag && !forceMoveFlag {
 		return completeStartPoint(ctx)
+	}
+
+	// Under -m/-M, the second positional is the *new name* (free text),
+	// not a ref. Offer no completions there so the user is not misled into
+	// picking an existing branch.
+	if len(args) >= 1 && (moveFlag || forceMoveFlag) {
+		return nil, cobra.ShellCompDirectiveNoFileComp
 	}
 
 	// For delete flags, allow multiple arguments (same completion as first arg)
