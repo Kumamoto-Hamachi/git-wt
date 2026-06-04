@@ -308,6 +308,93 @@ func TestE2E_MoveWorktree(t *testing.T) {
 		}
 	})
 
+	t.Run("respects_basedir_flag_override", func(t *testing.T) {
+		t.Parallel()
+		repo := testutil.NewTestRepo(t)
+		repo.CreateFile("README.md", "# Test")
+		repo.Commit("initial commit")
+
+		altBase := filepath.Join(repo.ParentDir(), "alt-base")
+
+		// Create the worktree under the overridden basedir.
+		out, err := runGitWt(t, binPath, repo.Root, "--basedir", altBase, "alt-src")
+		if err != nil {
+			t.Fatalf("failed to create worktree under alt basedir: %v\noutput: %s", err, out)
+		}
+		oldPath := worktreePath(out)
+		expectedOld := filepath.Join(altBase, "alt-src")
+		if oldPath != expectedOld {
+			// Tolerate symlink resolution differences on macOS.
+			resolvedOld, errOld := filepath.EvalSymlinks(oldPath)
+			resolvedExpected, errExp := filepath.EvalSymlinks(expectedOld)
+			if errOld != nil || errExp != nil || resolvedOld != resolvedExpected {
+				t.Fatalf("worktree should live under %q, got %q", expectedOld, oldPath)
+			}
+		}
+
+		// Rename it using the same basedir override. Without the override
+		// being honored by -m, the rename would compute paths against the
+		// default .wt basedir and fail to find the worktree or clean up the
+		// wrong tree.
+		out, err = runGitWt(t, binPath, repo.Root, "--basedir", altBase, "-m", "alt-src", "alt-dst")
+		if err != nil {
+			t.Fatalf("rename with --basedir override failed: %v\noutput: %s", err, out)
+		}
+
+		newPath := filepath.Join(altBase, "alt-dst")
+		if _, err := os.Stat(newPath); err != nil {
+			t.Errorf("renamed worktree should exist at %q: %v", newPath, err)
+		}
+	})
+
+	t.Run("branch_only_rename_when_dir_already_matches", func(t *testing.T) {
+		t.Parallel()
+		repo := testutil.NewTestRepo(t)
+		repo.CreateFile("README.md", "# Test")
+		repo.Commit("initial commit")
+
+		// Create a worktree where dir name (mydir) differs from branch name
+		// (some-branch) via the -b flag.
+		out, err := runGitWt(t, binPath, repo.Root, "-b", "some-branch", "mydir")
+		if err != nil {
+			t.Fatalf("failed to create worktree with -b: %v\noutput: %s", err, out)
+		}
+		wtPath := worktreePath(out)
+
+		// Renaming to "mydir" should succeed: the directory already matches,
+		// only the branch needs renaming. Before the fix this would fail with
+		// "target worktree directory ... already exists".
+		out, err = runGitWt(t, binPath, repo.Root, "-m", "some-branch", "mydir")
+		if err != nil {
+			t.Fatalf("branch-only rename should succeed when dir already matches: %v\noutput: %s", err, out)
+		}
+
+		// Directory unchanged.
+		if _, err := os.Stat(wtPath); err != nil {
+			t.Errorf("worktree directory should still exist at %q: %v", wtPath, err)
+		}
+
+		// Branch renamed.
+		cmd := exec.Command("git", "branch", "--list", "mydir")
+		cmd.Dir = repo.Root
+		branchOut, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("git branch --list failed: %v", err)
+		}
+		if !strings.Contains(string(branchOut), "mydir") {
+			t.Errorf("mydir branch should exist after branch-only rename, got: %s", branchOut)
+		}
+		cmd = exec.Command("git", "branch", "--list", "some-branch")
+		cmd.Dir = repo.Root
+		branchOut, err = cmd.Output()
+		if err != nil {
+			t.Fatalf("git branch --list failed: %v", err)
+		}
+		if strings.Contains(string(branchOut), "some-branch") {
+			t.Errorf("some-branch should have been renamed away, still found: %s", branchOut)
+		}
+	})
+
 	t.Run("rejects_invalid_branch_name_before_move", func(t *testing.T) {
 		t.Parallel()
 		repo := testutil.NewTestRepo(t)

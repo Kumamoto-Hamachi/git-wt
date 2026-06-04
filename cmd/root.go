@@ -271,7 +271,7 @@ func runRoot(cmd *cobra.Command, args []string) error {
 		if branchFlag != "" {
 			return fmt.Errorf("cannot use -b/--branch with -m/-M")
 		}
-		return moveWorktree(ctx, args, forceMoveFlag)
+		return moveWorktree(ctx, cmd, args, forceMoveFlag)
 	}
 
 	// For create/switch: validate argument count (like git branch)
@@ -751,7 +751,7 @@ func deleteWorktrees(ctx context.Context, cmd *cobra.Command, branches []string,
 // moveWorktree renames a worktree's directory and its associated branch in
 // a single operation. It accepts either one argument (the new name, applied
 // to the current worktree) or two arguments (old, new).
-func moveWorktree(ctx context.Context, args []string, force bool) error {
+func moveWorktree(ctx context.Context, cmd *cobra.Command, args []string, force bool) error {
 	if len(args) == 0 || len(args) > 2 {
 		return fmt.Errorf("expected 1 or 2 arguments for -m/-M: <newname> or <oldname> <newname>, got %d", len(args))
 	}
@@ -764,7 +764,7 @@ func moveWorktree(ctx context.Context, args []string, force bool) error {
 		newName = args[1]
 	}
 
-	cfg, err := git.LoadConfig(ctx)
+	cfg, err := loadConfig(ctx, cmd)
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
@@ -855,12 +855,22 @@ func moveWorktree(ctx context.Context, args []string, force bool) error {
 	// under -M because `git branch -M` can overwrite a target branch; target
 	// directory collisions are checked unconditionally because `git worktree
 	// move --force` does NOT overwrite an existing destination — its --force
-	// only relaxes dirty/locked-worktree checks.
-	if info, err := os.Stat(newPath); err == nil {
-		if info.IsDir() {
-			return fmt.Errorf("target worktree directory %q already exists", newPath)
+	// only relaxes dirty/locked-worktree checks. The check is also skipped
+	// when newPath resolves to the same directory as oldPath (the
+	// branch-only rename case, e.g. a worktree created via `-b` whose
+	// directory is already named newName).
+	samePath := oldPath == filepath.Clean(newPath)
+	if !samePath {
+		info, err := os.Stat(newPath)
+		switch {
+		case err == nil:
+			if info.IsDir() {
+				return fmt.Errorf("target worktree directory %q already exists", newPath)
+			}
+			return fmt.Errorf("target path %q exists and is not a directory", newPath)
+		case !os.IsNotExist(err):
+			return fmt.Errorf("failed to stat target path %q: %w", newPath, err)
 		}
-		return fmt.Errorf("target path %q exists and is not a directory", newPath)
 	}
 	if !force && src.Branch != newName {
 		exists, err := git.LocalBranchExists(ctx, newName)
@@ -882,9 +892,9 @@ func moveWorktree(ctx context.Context, args []string, force bool) error {
 		inside = curWt == oldPath
 	}
 
-	// Move the directory first. Skip when source and target paths are identical
-	// (only the branch changes).
-	if oldPath != filepath.Clean(newPath) {
+	// Move the directory first. Skip when source and target paths are
+	// identical (only the branch changes).
+	if !samePath {
 		if err := git.MoveWorktree(ctx, oldPath, newPath, force); err != nil {
 			return fmt.Errorf("failed to move worktree: %w", err)
 		}
